@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package comment_censor;
+
+message CommentCensorRequest {
+  string comment_id = 1;
+  string content = 2;
+}
+
+message ImageCensorRequest {
+  string base_url = 1;
+  string media_file = 2;
+}
+
+message CommentCensorResponse {
+  string censor_content = 1;
+}
+message ImageCensorResponse {
+  string label = 1;
+  float score = 2;
+}
+service CommentCensorService {
+  rpc CheckComment (CommentCensorRequest) returns (CommentCensorResponse);
+  rpc CheckImage (ImageCensorRequest) returns (ImageCensorResponse);
+}

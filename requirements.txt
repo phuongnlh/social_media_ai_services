@@ -1,0 +1,12 @@
+pika==1.1.0
+transformers==4.30.0
+torch==2.8.0
+langdetect==1.0.9
+googletrans==4.0.0-rc1
+moviepy==1.0.3
+pillow==9.5.0
+pyyaml==6.0.1  
+numpy==1.26.4
+grpcio-tools==1.48.0
+protobuf==3.19.6
+
