@@ -147,14 +147,14 @@ class ImageModerator:
 
             # Configure session with proper timeouts and headers
             session = requests.Session()
-            session.headers.update({'User-Agent': 'YourVibesAI/1.0'})
+            session.headers.update({'User-Agent': 'DailyVibeAI/1.0'})
             
             # Stream the download with timeout
             response = session.get(
                 media_url, 
                 stream=True, 
                 timeout=(5, 30),  # (connect timeout, read timeout)
-                verify=False
+                verify=True
             )
             response.raise_for_status()
 

@@ -1,0 +1,15 @@
+# Loại bỏ các file không cần thiết
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.git/
+*.venv/
+venv/
+.env
+.env.local
+*.log
+tests/
+.notebooks/
+*.tar.gz
+.DS_Store
