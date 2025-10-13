@@ -20,8 +20,8 @@ class CommentCensorServicer(comment_censor_pb2_grpc.CommentCensorServiceServicer
         return comment_censor_pb2.CommentCensorResponse(censor_content=result["censored_text"])
     def CheckImage(self, request, context):
         base_url = request.base_url
-        media_file = request.media_file
-        result = self.image_moderator.moderate(base_url, media_file)
+        media_type = request.media_type
+        result = self.image_moderator.moderate(base_url, media_type)
         return comment_censor_pb2.ImageCensorResponse(label=result["label"], score=result.get("score", 0.0))
 
 def serve(config_env=None):

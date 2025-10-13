@@ -1,9 +1,12 @@
+import random
 import requests
 from transformers import AutoProcessor, AutoModelForImageClassification, CLIPProcessor, CLIPModel
 from PIL import Image
 import torch
 import os
 import uuid
+import threading, glob
+import math
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -38,12 +41,38 @@ class ImageModerator:
         # Configure thresholds
         self.violence_threshold = 0.7
         self.political_threshold = 0.7
-        self.abuse_threshold = 0.6
+        self.abuse_threshold = 0.7
         self.nsfw_threshold = 0.5
         
         # Setup temporary directory
         self.temp_dir = os.path.join("src", "temp")
         os.makedirs(self.temp_dir, exist_ok=True)
+        threading.Thread(target=self._cleanup_temp, daemon=True).start()
+
+    def _cleanup_temp(self):
+        """
+        Periodic cleanup for stale temp files (older than 10 minutes and no lock file)
+        """
+        while True:
+            try:
+                now = time.time()
+                for f in glob.glob(os.path.join(self.temp_dir, "temp_*")):
+                    if f.endswith(".lock"):
+                        continue  # bỏ qua file lock
+                    lock_path = f + ".lock"
+
+                    # ✅ Bỏ qua file đang được xử lý hoặc mới tải về
+                    if os.path.exists(lock_path):
+                        continue
+
+                    # ✅ Xóa file cũ hơn 10 phút
+                    if now - os.path.getmtime(f) > 600:
+                        os.remove(f)
+                        logger.info(f"[CLEANUP] Removed stale temp file: {f}")
+            except Exception as e:
+                logger.warning(f"Cleanup failed: {e}")
+
+            time.sleep(600)  # chạy mỗi 10 phút
     
     def _load_models(self) -> None:
         """Load all required models with error handling"""
@@ -58,7 +87,9 @@ class ImageModerator:
                 "Falconsai/nsfw_image_detection", 
                 cache_dir=self.cache_dir
             )
-            self.nsfw_labels = ["normal", "nsfw"]
+            self.nsfw_model_2 = AutoModelForImageClassification.from_pretrained("giacomoarienti/nsfw-classifier",cache_dir=self.cache_dir).to(self.device)
+            self.nsfw_processor_2 = AutoProcessor.from_pretrained("giacomoarienti/nsfw-classifier",cache_dir=self.cache_dir)
+            self.nsfw_labels = ["normal", "nsfw", "porn", "sexy", "hentai"]
             logger.info(f"NSFW model loaded in {time.time() - start_time:.2f} seconds")
 
             start_time = time.time()
@@ -99,6 +130,7 @@ class ImageModerator:
                 "child naked"
             ]
             self.meme_labels = ["normal", "meme", "funny image", "cartoon", "joke", "pet with object", "animal meme"]
+            logger.info("All models loaded successfully")
             # If using CUDA, optimize models for inference
             if self.use_cuda:
                 self._optimize_for_inference()
@@ -129,82 +161,51 @@ class ImageModerator:
             self.use_amp = True
         else:
             self.use_amp = False
-            
-    def _fetch_media(self, base_url: str, media_filename: str) -> str:
+
+    def _fetch_media(self, base_url: str, media_type: str) -> tuple[str, str]:
         """
-        Fetch media from URL with improved error handling and progress tracking
-        
-        Args:
-            base_url: The base URL to fetch the media from
-            media_filename: The filename of the media
-            
-        Returns:
-            Path to the downloaded temporary file
+        Fetch media from URL and save as temp file with correct extension.
         """
         try:
             media_url = f"{base_url}"
             logger.info(f"Fetching media from: {media_url}")
 
-            # Configure session with proper timeouts and headers
             session = requests.Session()
             session.headers.update({'User-Agent': 'DailyVibeAI/1.0'})
-            
-            # Stream the download with timeout
-            response = session.get(
-                media_url, 
-                stream=True, 
-                timeout=(5, 30),  # (connect timeout, read timeout)
-                verify=True
-            )
+            response = session.get(media_url, stream=True, timeout=(5, 30))
             response.raise_for_status()
 
-            # Check for valid content
             content_length = int(response.headers.get("Content-Length", 0))
             content_type = response.headers.get("Content-Type", "")
             logger.info(f"Content-Length: {content_length}, Content-Type: {content_type}")
-            
-            if content_length == 0:
-                raise ValueError("Content length is zero")
-                
-            # Create temp file
-            suffix = os.path.splitext(media_filename)[1]
-            temp_filename = f"temp_{uuid.uuid4().hex}{suffix}"
-            tmp_path = os.path.join(self.temp_dir, temp_filename)
-            
-            # Download with progress tracking
-            chunk_size = 8192
-            total_size = 0
-            start_time = time.time()
-            
+
+            # ✅ Xác định phần mở rộng dựa theo media_type hoặc Content-Type
+            ext_map = {"image": ".jpg", "video": ".mp4"}
+            if not media_type or media_type == "auto":
+                if "image" in content_type:
+                    media_type = "image"
+                elif "video" in content_type:
+                    media_type = "video"
+                else:
+                    media_type = "unknown"
+
+            ext = ext_map.get(media_type, "")
+            tmp_path = os.path.join(self.temp_dir, f"temp_{uuid.uuid4().hex}{ext}")
+            lock_path = tmp_path + ".lock"
+
+            # ✅ Tạo file lock ngay trước khi bắt đầu ghi file
+            open(lock_path, "w").close()
+
             with open(tmp_path, "wb") as tmp_file:
-                for chunk in response.iter_content(chunk_size=chunk_size):
+                for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         tmp_file.write(chunk)
-                        total_size += len(chunk)
-                        
-                        # Log progress for large files
-                        if content_length > 1024*1024 and total_size % (1024*1024) < chunk_size:
-                            elapsed = time.time() - start_time
-                            percent = (total_size / content_length) * 100 if content_length else 0
-                            logger.info(f"Downloaded: {total_size/1024/1024:.1f}MB ({percent:.1f}%) in {elapsed:.1f}s")
-            
-            downloaded_size = os.path.getsize(tmp_path)
-            logger.info(f"Download complete. File size: {downloaded_size/1024/1024:.2f}MB")
 
-            if downloaded_size == 0:
-                raise ValueError("Downloaded file is empty")
-                
-            # Verify the file is not corrupted
-            if content_length > 0 and abs(downloaded_size - content_length) > 1024:
-                logger.warning(f"File size mismatch: expected {content_length}, got {downloaded_size}")
+            logger.info(f"Download complete: {tmp_path}")
+            return (tmp_path, media_type)
 
-            return tmp_path
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Network error fetching media: {e}")
-            raise
         except Exception as e:
-            logger.error(f"Error fetching or saving media: {e}")
+            logger.error(f"Error fetching media: {e}")
             raise
 
     def _preprocess_image(self, image_path: str) -> Image.Image:
@@ -259,25 +260,14 @@ class ImageModerator:
             is_non_photorealistic = is_anime or is_meme
 
             # Adjust thresholds for non-photorealistic content
-            nsfw_threshold = self.nsfw_threshold * 1.3 if is_non_photorealistic else self.nsfw_threshold
-            violence_threshold = self.violence_threshold * 1.5 if is_non_photorealistic else self.violence_threshold
+            nsfw_threshold = self.nsfw_threshold
+            violence_threshold = self.violence_threshold * 1.3 if is_non_photorealistic else self.violence_threshold
             political_threshold = self.political_threshold * 1.3 if is_non_photorealistic else self.political_threshold
-            abuse_threshold = self.abuse_threshold * 1.5 if is_non_photorealistic else self.abuse_threshold
+            abuse_threshold = self.abuse_threshold * 1.3 if is_non_photorealistic else self.abuse_threshold
 
             # Check NSFW content first (most important filter)
             nsfw_result = self._check_nsfw(image)
             if nsfw_result["label"] == "nsfw" and nsfw_result["score"] > nsfw_threshold:
-                if is_non_photorealistic:
-                    logger.info(f"NSFW anime/meme content detected: {nsfw_result}, flagging for review")
-                    return {
-                        "label": "warning",
-                        "score": round(nsfw_result["score"], 4),
-                        "detail": "anime_nsfw" if is_anime else "meme_nsfw",
-                        "anime_info": anime_result if is_anime else None,
-                        "meme_info": meme_result if is_meme else None,
-                        "needs_review": True
-                    }
-                else:
                     logger.info(f"NSFW content detected: {nsfw_result}")
                     return nsfw_result
             
@@ -353,44 +343,83 @@ class ImageModerator:
             return {"label": "error", "score": 0.0, "error": str(e)}
 
     def _check_nsfw(self, image: Image.Image) -> dict:
-        """Check if image contains NSFW content"""
+        """Check if image contains NSFW content using 2 models"""
         with torch.no_grad():
-            inputs_nsfw = self.nsfw_processor(images=image, return_tensors="pt").to(self.device)
-            
+            # Model 1
+            inputs1 = self.nsfw_processor(images=image, return_tensors="pt").to(self.device)
             if self.use_amp:
                 with torch.cuda.amp.autocast():
-                    outputs_nsfw = self.nsfw_model(**inputs_nsfw)
+                    outputs1 = self.nsfw_model(**inputs1)
             else:
-                outputs_nsfw = self.nsfw_model(**inputs_nsfw)
-                
-            probs_nsfw = outputs_nsfw.logits.softmax(dim=1).tolist()[0]
-            nsfw_score = probs_nsfw[1]  # Index 1 is "nsfw" class
+                outputs1 = self.nsfw_model(**inputs1)
+            probs1 = outputs1.logits.softmax(dim=1).tolist()[0]
+            nsfw_score_1 = probs1[1]  # index 1 = nsfw
+
+            # Model 2
+            inputs2 = self.nsfw_processor_2(images=image, return_tensors="pt").to(self.device)
+            if self.use_amp:
+                with torch.cuda.amp.autocast():
+                    outputs2 = self.nsfw_model_2(**inputs2)
+            else:
+                outputs2 = self.nsfw_model_2(**inputs2)
+            probs2 = outputs2.logits.softmax(dim=1).tolist()[0]
+            probs2_filtered = probs2[:2] + probs2[3:]
+
+            nsfw_score_2 = max(probs2_filtered)
+            nsfw_label_2 = "nsfw" if nsfw_score_2 > self.nsfw_threshold else "normal"
+
+            # Take the max score between 2 models
+            nsfw_score = max(nsfw_score_1, nsfw_score_2)
             nsfw_label = "nsfw" if nsfw_score > self.nsfw_threshold else "normal"
-            
-            logger.info(f"NSFW detection: {nsfw_label} ({nsfw_score:.4f})")
-            return {"label": nsfw_label, "score": round(nsfw_score, 4)}
+            detail = "model1" if nsfw_score_1 >= nsfw_score_2 else "model2"
+
+            logger.info(f"NSFW detection: {nsfw_label} ({nsfw_score:.4f}), detail: {detail}, model1_score={nsfw_score_1:.4f}, model2_score={nsfw_score_2:.4f}")
+            return {"label": nsfw_label, "score": round(nsfw_score, 4), "detail": detail}
 
     def _check_violence(self, image: Image.Image) -> dict:
         """Check if image contains violence"""
         with torch.no_grad():
-            inputs_clip = self.clip_processor(text=self.violence_labels, images=image, return_tensors="pt", padding=True).to(self.device)
-            
-            if self.use_amp:
-                with torch.cuda.amp.autocast():
-                    outputs_clip = self.clip_model(**inputs_clip)
-            else:
+            # Chuẩn bị dữ liệu cho CLIP
+            inputs_clip = self.clip_processor(
+                text=self.violence_labels,
+                images=image,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+
+            # Inference (hỗ trợ mixed precision nếu có)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
                 outputs_clip = self.clip_model(**inputs_clip)
-                
+
             probs = outputs_clip.logits_per_image.softmax(dim=1).tolist()[0]
-            # Get the highest non-normal score
-            non_normal_scores = {label: score for label, score in zip(self.violence_labels[1:], probs[1:])}
-            max_label = max(non_normal_scores, key=non_normal_scores.get) if non_normal_scores else "normal"
-            max_score = non_normal_scores.get(max_label, 0)
-            
-            result_label = max_label if max_score > self.violence_threshold else "normal"
-            is_violence = result_label != "normal"
-            
-            logger.info(f"Violence detection: {result_label} ({max_score:.4f})")
+
+            # Kiểm tra NaN để tránh lỗi
+            if any(math.isnan(p) for p in probs):
+                logger.warning("NaN detected in violence scores, returning normal")
+                return {"label": "normal", "score": 0.0, "detail": ""}
+
+            # Bỏ nhãn "normal" ra khỏi so sánh
+            normal_index = self.violence_labels.index("normal") if "normal" in self.violence_labels else None
+            non_normal_scores = {
+                label: score
+                for i, (label, score) in enumerate(zip(self.violence_labels, probs))
+                if i != normal_index
+            }
+
+            # Lấy nhãn có xác suất cao nhất
+            max_label = max(non_normal_scores, key=non_normal_scores.get)
+            max_score = non_normal_scores[max_label]
+
+            # Xác định kết quả
+            is_violence = max_score > self.violence_threshold
+            result_label = max_label if is_violence else "normal"
+
+            # Log gọn, rõ
+            if is_violence:
+                logger.warning(f"[VIOLENCE DETECTED] {result_label} ({max_score:.4f})")
+            else:
+                logger.info(f"[SAFE] Violence score max={max_score:.4f}")
+
             return {
                 "label": "violence" if is_violence else "normal",
                 "score": round(max_score, 4),
@@ -456,70 +485,73 @@ class ImageModerator:
                 "detail": max_label if is_abuse else ""
             }
 
-    def moderate(self, base_url: str, media_filename: str) -> dict:
+    def moderate(self, base_url: str, media_type: str) -> dict:
         """
-        Moderate media from a URL
-        
-        Args:
-            base_url: URL to fetch the media from
-            media_filename: Filename of the media
-            
-        Returns:
-            Dictionary with moderation results
+        Moderate media by its type ("image" or "video")
         """
         start_time = time.time()
         temp_path = None
         try:
-            temp_path = self._fetch_media(base_url, media_filename)
-            
-            # Determine if the file is a video or image
-            is_video = media_filename.lower().endswith((".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm"))
-            
-            result = self._moderate_video(temp_path) if is_video else self.moderate_image(temp_path)
-            logger.info(f"Moderation completed in {time.time() - start_time:.2f}s: {result}")
+            if media_type not in ("image", "video"):
+                logger.warning(f"Unsupported media type: {media_type}")
+                return {"label": "skipped", "score": 0.0, "detail": "unsupported_type"}
+
+            temp_path, media_type = self._fetch_media(base_url, media_type)
+
+            # ✅ Model xử lý theo loại
+            if media_type == "video":
+                result = self._moderate_video(temp_path)
+            else:
+                result = self.moderate_image(temp_path)
+
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Final moderation result for {media_type}: {result['label']} ({result.get('score', 0):.2f}) in {elapsed:.2f}s")
             return result
-            
+
         except Exception as e:
             logger.error(f"Moderation error: {e}")
             return {"label": "error", "score": 0.0, "error": str(e)}
+
         finally:
-            # Clean up temporary file
-            if temp_path and os.path.exists(temp_path):
+            # ✅ Cleanup an toàn sau khi xử lý xong
+            if temp_path:
                 try:
-                    os.remove(temp_path)
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    lock_path = temp_path + ".lock"
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
                 except Exception as e:
-                    logger.error(f"Error removing temporary file {temp_path}: {e}")
+                    logger.warning(f"Could not remove temp file {temp_path}: {e}")
 
     def _moderate_video(self, video_path: str, num_frames: int = 5) -> dict:
-        """
-        Moderate a video by sampling frames and analyzing them
-        
-        Args:
-            video_path: Path to the video file
-            num_frames: Number of frames to sample
-            
-        Returns:
-            Dictionary with moderation results
-        """
+        """Moderate a video by sampling frames and analyzing them with early stop"""
         try:
-            # Open the video file
             logger.info(f"Processing video: {video_path}")
             clip = VideoFileClip(video_path)
-            
-            # Calculate frames to extract (beginning, middle, and end)
             duration = clip.duration
             logger.info(f"Video duration: {duration:.2f}s")
-            
-            if duration < 1.0:
-                # For very short videos, just take the middle frame
-                timestamps = [duration / 2]
+
+            # Determine number of frames based on video length
+            if duration < 5:
+                num_frames = 3
+            elif duration < 30:
+                num_frames = 6
+            elif duration < 120:
+                num_frames = 10
+            elif duration < 300:
+                num_frames = 14
+            elif duration < 600:
+                num_frames = 18
             else:
-                # Distribute frames across the video
-                timestamps = [
-                    duration * i / (num_frames + 1) 
-                    for i in range(1, num_frames + 1)
-                ]
-            
+                num_frames = 20
+
+            # Calculate timestamps for frames
+            if duration > 600:
+                timestamps = sorted(random.uniform(0, duration) for _ in range(num_frames))
+            else:
+                timestamps = [duration * i / (num_frames + 1) for i in range(1, num_frames + 1)]
+
             # Extract frames
             temp_files = []
             for i, t in enumerate(timestamps):
@@ -528,84 +560,78 @@ class ImageModerator:
                 Image.fromarray(frame).save(frame_path)
                 temp_files.append(frame_path)
                 logger.info(f"Extracted frame {i+1}/{len(timestamps)} at {t:.2f}s")
-            
-            # Process frames (optionally in parallel)
-            if len(temp_files) <= 2:
-                # Sequential processing for small number of frames
-                results = [self.moderate_image(path) for path in temp_files]
-            else:
-                # Parallel processing for multiple frames
-                with ThreadPoolExecutor(max_workers=min(len(temp_files), 3)) as executor:
-                    results = list(executor.map(self.moderate_image, temp_files))
-            
-            # Clean up temporary files
+
+            # Moderate frames
+            results = []
+            early_stop = False
+            for i, path in enumerate(temp_files):
+                result = self.moderate_image(path)
+                results.append(result)
+
+                if result["label"] in ("nsfw", "violence", "abuse") and result.get("score", 0) > 0.8:
+                    logger.info(f"⚠️ Early stop: Detected {result['label']} with score {result['score']:.2f} at frame {i+1}")
+                    early_stop = True
+                    break
+
+            # Process remaining frames in parallel if not early stop
+            if not early_stop and len(results) < len(temp_files):
+                remaining = temp_files[len(results):]
+                with ThreadPoolExecutor(max_workers=min(len(remaining), 3)) as executor:
+                    results.extend(executor.map(self.moderate_image, remaining))
+
+            # Clean up temp files
             for path in temp_files:
                 if os.path.exists(path):
                     os.remove(path)
-            
-            # Close video resources
+
             clip.reader.close()
             if clip.audio:
                 clip.audio.reader.close_proc()
-            
-            # Analyze results with weighted scoring system
+
+            # Aggregate frame results
             return self._analyze_video_results(results)
-            
+
         except Exception as e:
             logger.error(f"Error processing video: {e}")
             raise
 
-    def _analyze_video_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _analyze_video_results(self, results: list) -> dict:
         """
-        Analyze video frame results with improved scoring
-        
-        Args:
-            results: List of frame analysis results
-            
-        Returns:
-            Aggregated result
+        Analyze video frame results with improved scoring for NSFW and other labels
         """
         if not results:
             return {"label": "error", "score": 0.0, "error": "No frames analyzed"}
-            
-        # Count occurrences of each label
+
+        total_frames = len(results)
+
+        # Nhóm frame theo label
         labels = [r["label"] for r in results]
         label_counts = {label: labels.count(label) for label in set(labels)}
-        
-        # Calculate percentage of problematic frames
-        total_frames = len(results)
-        
-        # Process by priority order
+
+        # Kiểm tra các nhãn ưu tiên
         for priority_label in ["nsfw", "abuse", "violence", "political"]:
             if priority_label in label_counts:
-                # If more than 40% of frames have this label or at least 2 frames
                 count = label_counts[priority_label]
-                if count / total_frames >= 0.4 or count >= 2:
-                    # Get all scores for this label
-                    relevant_results = [r for r in results if r["label"] == priority_label]
-                    scores = [r["score"] for r in relevant_results]
-                    
-                    # Get the highest scoring detail if available
-                    details = [r.get("detail", "") for r in relevant_results if "detail" in r]
-                    detail = max(details, key=details.count) if details else ""
-                    
-                    # Use 90th percentile score rather than mean to capture problematic frames
-                    scores.sort()
-                    percentile_idx = min(int(len(scores) * 0.9), len(scores) - 1)
-                    final_score = scores[percentile_idx]
-                    
+                frames = [r for r in results if r["label"] == priority_label]
+                scores = [r["score"] for r in frames]
+                details = [r.get("detail", "") for r in frames if "detail" in r]
+                detail = max(details, key=details.count) if details else ""
+
+                # Điều kiện gán nhãn: >=40% frame hoặc >=2 frame hoặc score frame cao cực (>0.90)
+                if count / total_frames >= 0.4 or count >= 2 or max(scores) > 0.90:
+                    final_score = max(scores)
                     return {
                         "label": priority_label,
                         "score": round(final_score, 4),
                         "detail": detail,
                         "frame_ratio": f"{count}/{total_frames}"
                     }
-        
-        # If no problematic frames exceed the threshold, the video is normal
+
+        # Nếu không có nhãn ưu tiên nào
         normal_scores = [r["score"] for r in results if r["label"] == "normal"]
         final_score = median(normal_scores) if normal_scores else 0.0
-        
         return {"label": "normal", "score": round(final_score, 4)}
+    
     def _check_meme(self, image: Image.Image) -> dict:
         """Check if image is a meme or humorous content"""
         with torch.no_grad():

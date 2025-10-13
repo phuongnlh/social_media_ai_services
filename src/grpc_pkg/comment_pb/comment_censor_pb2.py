@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14\x63omment_censor.proto\x12\x0e\x63omment_censor\";\n\x14\x43ommentCensorRequest\x12\x12\n\ncomment_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\":\n\x12ImageCensorRequest\x12\x10\n\x08\x62\x61se_url\x18\x01 \x01(\t\x12\x12\n\nmedia_file\x18\x02 \x01(\t\"/\n\x15\x43ommentCensorResponse\x12\x16\n\x0e\x63\x65nsor_content\x18\x01 \x01(\t\"3\n\x13ImageCensorResponse\x12\r\n\x05label\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x02\x32\xca\x01\n\x14\x43ommentCensorService\x12[\n\x0c\x43heckComment\x12$.comment_censor.CommentCensorRequest\x1a%.comment_censor.CommentCensorResponse\x12U\n\nCheckImage\x12\".comment_censor.ImageCensorRequest\x1a#.comment_censor.ImageCensorResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14\x63omment_censor.proto\x12\x0e\x63omment_censor\";\n\x14\x43ommentCensorRequest\x12\x12\n\ncomment_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\":\n\x12ImageCensorRequest\x12\x10\n\x08\x62\x61se_url\x18\x01 \x01(\t\x12\x12\n\nmedia_type\x18\x02 \x01(\t\"/\n\x15\x43ommentCensorResponse\x12\x16\n\x0e\x63\x65nsor_content\x18\x01 \x01(\t\"3\n\x13ImageCensorResponse\x12\r\n\x05label\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x02\x32\xca\x01\n\x14\x43ommentCensorService\x12[\n\x0c\x43heckComment\x12$.comment_censor.CommentCensorRequest\x1a%.comment_censor.CommentCensorResponse\x12U\n\nCheckImage\x12\".comment_censor.ImageCensorRequest\x1a#.comment_censor.ImageCensorResponseb\x06proto3')
 
 
 

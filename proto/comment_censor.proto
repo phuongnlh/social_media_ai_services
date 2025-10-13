@@ -9,7 +9,7 @@ message CommentCensorRequest {
 
 message ImageCensorRequest {
   string base_url = 1;
-  string media_file = 2;
+  string media_type = 2;
 }
 
 message CommentCensorResponse {
