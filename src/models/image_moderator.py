@@ -40,7 +40,6 @@ class ImageModerator:
         
         # Configure thresholds
         self.violence_threshold = 0.7
-        self.political_threshold = 0.7
         self.abuse_threshold = 0.7
         self.nsfw_threshold = 0.5
         
@@ -93,18 +92,6 @@ class ImageModerator:
             logger.info(f"NSFW model loaded in {time.time() - start_time:.2f} seconds")
 
             start_time = time.time()
-            logger.info("Loading Anime vs Real detection model...")
-            self.anime_model = AutoModelForImageClassification.from_pretrained(
-                "prithivMLmods/AI-vs-Deepfake-vs-Real", 
-                cache_dir=self.cache_dir
-            ).to(self.device)
-            self.anime_processor = AutoProcessor.from_pretrained(
-                "prithivMLmods/AI-vs-Deepfake-vs-Real", 
-                cache_dir=self.cache_dir
-            )
-            logger.info(f"Anime vs Real model loaded in {time.time() - start_time:.2f} seconds")
-
-            start_time = time.time()
             logger.info("Loading CLIP model...")
             self.clip_model = CLIPModel.from_pretrained(
                 "openai/clip-vit-base-patch32", 
@@ -118,7 +105,6 @@ class ImageModerator:
             
             # Define labels for different content categories
             self.violence_labels = ["normal", "violence", "fighting", "weapons", "blood", "injury"]
-            self.political_labels = ["normal", "political", "propaganda", "political symbol", "protest"]
             self.abuse_labels = [
                 "normal", 
                 "nude child", 
@@ -129,7 +115,6 @@ class ImageModerator:
                 "child shirtless", 
                 "child naked"
             ]
-            self.meme_labels = ["normal", "meme", "funny image", "cartoon", "joke", "pet with object", "animal meme"]
             logger.info("All models loaded successfully")
             # If using CUDA, optimize models for inference
             if self.use_cuda:
@@ -248,92 +233,26 @@ class ImageModerator:
             start_time = time.time()
             image = self._preprocess_image(image_path)
 
-            # Check if image is anime/cartoon vs real photo
-            anime_result = self._check_anime(image)
-            is_anime = anime_result["is_anime"]
-            
-            # Get meme detection result
-            meme_result = self._check_meme(image)
-            is_meme = meme_result["is_meme"]
-
-            # Content is non-photorealistic if it's anime or meme
-            is_non_photorealistic = is_anime or is_meme
-
-            # Adjust thresholds for non-photorealistic content
-            nsfw_threshold = self.nsfw_threshold
-            violence_threshold = self.violence_threshold * 1.3 if is_non_photorealistic else self.violence_threshold
-            political_threshold = self.political_threshold * 1.3 if is_non_photorealistic else self.political_threshold
-            abuse_threshold = self.abuse_threshold * 1.3 if is_non_photorealistic else self.abuse_threshold
-
             # Check NSFW content first (most important filter)
             nsfw_result = self._check_nsfw(image)
-            if nsfw_result["label"] == "nsfw" and nsfw_result["score"] > nsfw_threshold:
-                    logger.info(f"NSFW content detected: {nsfw_result}")
-                    return nsfw_result
+            if nsfw_result["label"] == "nsfw" and nsfw_result["score"] > self.nsfw_threshold:
+                logger.info(f"NSFW content detected: {nsfw_result}")
+                return nsfw_result
             
             # Check child abuse content (high priority)
             abuse_result = self._check_abuse(image)
-            if abuse_result["label"] == "abuse" and abuse_result["score"] > abuse_threshold:
-                if is_non_photorealistic:
-                    logger.info(f"Abuse in anime/meme content detected: {abuse_result}, flagging for review")
-                    return {
-                        "label": "warning",
-                        "score": round(abuse_result["score"], 4),
-                        "detail": "anime_abuse" if is_anime else "meme_abuse",
-                        "anime_info": anime_result if is_anime else None,
-                        "meme_info": meme_result if is_meme else None,
-                        "needs_review": True
-                    }
-                else:
-                    logger.info(f"Abuse content detected: {abuse_result}")
-                    return abuse_result
+            if abuse_result["label"] == "abuse" and abuse_result["score"] > self.abuse_threshold:
+                logger.info(f"Abuse content detected: {abuse_result}")
+                return abuse_result
                 
             # Check violence content
             violence_result = self._check_violence(image)
-            if violence_result["label"] == "violence" and violence_result["score"] > violence_threshold:
-                if is_non_photorealistic:
-                    logger.info(f"Violence in anime/meme content detected: {violence_result}, flagging for review")
-                    return {
-                        "label": "warning",
-                        "score": round(violence_result["score"], 4),
-                        "detail": "anime_violence" if is_anime else "meme_violence",
-                        "anime_info": anime_result if is_anime else None,
-                        "meme_info": meme_result if is_meme else None,
-                        "needs_review": True
-                    }
-                else:
-                    logger.info(f"Violence content detected: {violence_result}")
-                    return violence_result
-                
-            # Check political content
-            political_result = self._check_political(image)
-            if political_result["label"] == "political" and political_result["score"] > political_threshold:
-                if is_non_photorealistic:
-                    logger.info(f"Political anime/meme content detected: {political_result}, flagging for review")
-                    return {
-                        "label": "warning",
-                        "score": round(political_result["score"], 4),
-                        "detail": "anime_political" if is_anime else "meme_political",
-                        "anime_info": anime_result if is_anime else None,
-                        "meme_info": meme_result if is_meme else None,
-                        "needs_review": True
-                    }
-                else:
-                    logger.info(f"Political content detected: {political_result}")
-                    return political_result
+            if violence_result["label"] == "violence" and violence_result["score"] > self.violence_threshold:
+                logger.info(f"Violence content detected: {violence_result}")
+                return violence_result
             
             # If all checks pass, content is normal
-            if is_non_photorealistic:
-                result = {
-                    "label": "normal", 
-                    "score": round(0.8, 4), 
-                    "is_anime": is_anime,
-                    "is_meme": is_meme,
-                    "anime_info": anime_result if is_anime else None,
-                    "meme_info": meme_result if is_meme else None
-                }
-            else:
-                result = {"label": "normal", "score": round(1.0 - nsfw_result["score"], 4)}
+            result = {"label": "normal", "score": round(1.0 - nsfw_result["score"], 4)}
             
             logger.info(f"Image moderation completed in {time.time() - start_time:.2f}s: {result}")
             return result
@@ -424,33 +343,6 @@ class ImageModerator:
                 "label": "violence" if is_violence else "normal",
                 "score": round(max_score, 4),
                 "detail": result_label if is_violence else ""
-            }
-
-    def _check_political(self, image: Image.Image) -> dict:
-        """Check if image contains political content"""
-        with torch.no_grad():
-            inputs_clip = self.clip_processor(text=self.political_labels, images=image, return_tensors="pt", padding=True).to(self.device)
-            
-            if self.use_amp:
-                with torch.cuda.amp.autocast():
-                    outputs_clip = self.clip_model(**inputs_clip)
-            else:
-                outputs_clip = self.clip_model(**inputs_clip)
-                
-            probs = outputs_clip.logits_per_image.softmax(dim=1).tolist()[0]
-            # Get the highest non-normal score
-            non_normal_scores = {label: score for label, score in zip(self.political_labels[1:], probs[1:])}
-            max_label = max(non_normal_scores, key=non_normal_scores.get) if non_normal_scores else "normal"
-            max_score = non_normal_scores.get(max_label, 0)
-            
-            result_label = max_label if max_score > self.political_threshold else "normal"
-            is_political = result_label != "normal"
-            
-            logger.info(f"Political detection: {result_label} ({max_score:.4f})")
-            return {
-                "label": "political" if is_political else "normal",
-                "score": round(max_score, 4),
-                "detail": result_label if is_political else ""
             }
 
     def _check_abuse(self, image: Image.Image) -> dict:
@@ -609,7 +501,7 @@ class ImageModerator:
         label_counts = {label: labels.count(label) for label in set(labels)}
 
         # Kiểm tra các nhãn ưu tiên
-        for priority_label in ["nsfw", "abuse", "violence", "political"]:
+        for priority_label in ["nsfw", "abuse", "violence"]:
             if priority_label in label_counts:
                 count = label_counts[priority_label]
                 frames = [r for r in results if r["label"] == priority_label]
@@ -631,51 +523,3 @@ class ImageModerator:
         normal_scores = [r["score"] for r in results if r["label"] == "normal"]
         final_score = median(normal_scores) if normal_scores else 0.0
         return {"label": "normal", "score": round(final_score, 4)}
-    
-    def _check_meme(self, image: Image.Image) -> dict:
-        """Check if image is a meme or humorous content"""
-        with torch.no_grad():
-            inputs_clip = self.clip_processor(text=self.meme_labels, images=image, return_tensors="pt", padding=True).to(self.device)
-            
-            if self.use_amp:
-                with torch.cuda.amp.autocast():
-                    outputs_clip = self.clip_model(**inputs_clip)
-            else:
-                outputs_clip = self.clip_model(**inputs_clip)
-                
-            probs = outputs_clip.logits_per_image.softmax(dim=1).tolist()[0]
-            
-            # Lấy nhãn và điểm cao nhất cho meme
-            non_normal_scores = {label: score for label, score in zip(self.meme_labels[1:], probs[1:])}
-            max_label = max(non_normal_scores, key=non_normal_scores.get) if non_normal_scores else "normal"
-            max_score = non_normal_scores.get(max_label, 0)
-            
-            is_meme = max_score > 0.6  # Ngưỡng cho meme
-            
-            logger.info(f"Meme detection: {max_label if is_meme else 'normal'} ({max_score:.4f})")
-            return {
-                "is_meme": is_meme,
-                "meme_score": round(max_score, 4),
-                "meme_type": max_label if is_meme else ""
-            }
-    def _check_anime(self, image: Image.Image) -> dict:
-        """Check if image is anime/cartoon or real photo"""
-        with torch.no_grad():
-            inputs = self.anime_processor(images=image, return_tensors="pt").to(self.device)
-            
-            if self.use_amp:
-                with torch.cuda.amp.autocast():
-                    outputs = self.anime_model(**inputs)
-            else:
-                outputs = self.anime_model(**inputs)
-                
-            probs = outputs.logits.softmax(dim=1).tolist()[0]
-            # The model outputs [anime_score, real_score]
-            anime_score = probs[0]  # Index 0 for anime class
-            is_anime = anime_score > 0.7  # Threshold for anime detection
-            
-            logger.info(f"Anime detection: {'anime' if is_anime else 'real'} ({anime_score:.4f})")
-            return {
-                "is_anime": is_anime,
-                "anime_score": round(anime_score, 4)
-            }

@@ -42,8 +42,8 @@ The Python server provides the following content moderation functions:
 
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/poin4003/Pekoda_ai_service.git
-   cd Pekoda_ai_service
+   git clone https://github.com/phuongnlh/social_media_ai_service.git
+   cd social_media_ai_service
    ```
 
 2. **Create Configuration File**
